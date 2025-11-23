@@ -165,6 +165,7 @@ tab1, tab2, tab3 = st.tabs(["🗺️ Heatmap", "📉 Stock Overlay", "📄 Raw D
 with tab1:
     st.subheader(f"Union Hotspots: {selected_ticker}")
     state_counts = ticker_data.groupby('State').size().reset_index(name='Filings')
+    
     fig_map = px.choropleth(
         state_counts,
         locations='State',
@@ -173,6 +174,18 @@ with tab1:
         scope="usa",
         color_continuous_scale="Reds"
     )
+    
+    # UPGRADE: Make background transparent to match Dark Mode
+    fig_map.update_layout(
+        geo=dict(
+            bgcolor= 'rgba(0,0,0,0)', # Transparent land background
+            lakecolor='rgba(0,0,0,0)',
+        ),
+        paper_bgcolor='rgba(0,0,0,0)', # Transparent outer chart
+        plot_bgcolor='rgba(0,0,0,0)',  # Transparent inner chart
+        margin=dict(l=0, r=0, t=0, b=0) # Remove whitespace margins
+    )
+    
     st.plotly_chart(fig_map, use_container_width=True)
 
 with tab2:
@@ -213,3 +226,4 @@ with tab2:
 
 with tab3:
     st.dataframe(ticker_data)
+
