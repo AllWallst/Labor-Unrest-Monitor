@@ -6,3 +6,5 @@ requests
 thefuzz
 python-Levenshtein
 lxml
+html5lib
+beautifulsoup4
