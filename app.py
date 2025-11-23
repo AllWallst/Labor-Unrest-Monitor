@@ -6,7 +6,7 @@ import yfinance as yf
 import requests
 from thefuzz import process
 from datetime import datetime, timedelta
-import io
+import os
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -15,12 +15,14 @@ st.set_page_config(
     page_icon="🛠️"
 )
 
+# --- CONFIGURATION ---
+DATA_FILE = "recent_filings.csv"
+
 # --- HEADER ---
 st.title("🛠️ The Labor Unrest Monitor")
-st.markdown("""
-**Status:** The NLRB website now blocks simple scrapers. 
-*   **Solution:** Download the official daily CSV from [NLRB Recent Filings](https://www.nlrb.gov/reports/graphs-data/recent-filings) and drop it below.
-*   **Demo Mode:** Loading historical data for demonstration.
+st.markdown(f"""
+**Status:** Monitoring local data feed.
+**Data Source:** `{DATA_FILE}` (Updated daily via internal cron job).
 """)
 
 # --- 1. DATA LOADING FUNCTIONS ---
@@ -38,28 +40,26 @@ def get_sec_tickers():
         st.error(f"⚠️ SEC Ticker List unavailable: {e}")
         return pd.DataFrame()
 
-def load_demo_data():
-    """Provides a fallback dataset so the app works immediately."""
-    data = [
-        {"Date": "2023-11-21", "Labor_Name": "Starbucks Coffee Co", "City": "Buffalo", "State": "NY", "Employees": 25, "Case_Type": "RC"},
-        {"Date": "2023-11-20", "Labor_Name": "Starbucks Coffee Co", "City": "Mesa", "State": "AZ", "Employees": 15, "Case_Type": "RC"},
-        {"Date": "2023-11-18", "Labor_Name": "Amazon Services LLC", "City": "Staten Island", "State": "NY", "Employees": 2000, "Case_Type": "RC"},
-        {"Date": "2023-11-15", "Labor_Name": "Wells Fargo Bank", "City": "Albuquerque", "State": "NM", "Employees": 12, "Case_Type": "RC"},
-        {"Date": "2023-11-10", "Labor_Name": "Apple Retail", "City": "Towson", "State": "MD", "Employees": 85, "Case_Type": "RC"},
-    ]
-    return pd.DataFrame(data)
-
 # --- 2. MATCHING LOGIC ---
 
-def match_tickers(nlrb_df, sec_df):
-    """Matches messy government names to clean Stock Tickers."""
-    if sec_df.empty: return nlrb_df
+@st.cache_data(ttl=3600) # Cache the matching so it doesn't re-run on every click
+def process_local_data(file_path, sec_df):
+    """Reads local CSV, cleans it, and matches tickers."""
     
-    # Clean up column names from the CSV upload
+    # Load Data
+    try:
+        nlrb_df = pd.read_csv(file_path)
+    except Exception as e:
+        return pd.DataFrame(), f"Error reading CSV: {e}"
+
+    if sec_df.empty: 
+        return nlrb_df, "SEC Data missing, skipping matching."
+    
+    # standardizing column names (handle both Scraped and Exported formats)
     nlrb_df.columns = nlrb_df.columns.str.strip()
     
-    # Map CSV columns to our standard names
-    # The NLRB CSV usually has columns: 'Case Name', 'Date Filed', 'City', 'State', 'No Employees'
+    # Map CSV columns to our standard names if they differ
+    # Adjust these keys based on exactly what your cron job saves
     col_map = {
         'Case Name': 'Labor_Name', 
         'Date Filed': 'Date', 
@@ -67,6 +67,10 @@ def match_tickers(nlrb_df, sec_df):
         'Case Number': 'Case_Type'
     }
     nlrb_df = nlrb_df.rename(columns=col_map)
+    
+    # Filter for Union Votes (RC/RD/RM) immediately
+    if 'Case_Type' in nlrb_df.columns:
+        nlrb_df = nlrb_df[nlrb_df['Case_Type'].str.contains("-RC-|-RD-|-RM-", na=False)]
     
     # Convert Date
     nlrb_df['Date'] = pd.to_datetime(nlrb_df['Date'], errors='coerce')
@@ -77,16 +81,14 @@ def match_tickers(nlrb_df, sec_df):
     
     matched_data = []
     
-    # Show progress
-    progress_bar = st.progress(0, text="Analyzing filings...")
-    total_rows = len(nlrb_df)
-    
+    # Matching Loop
     for index, row in nlrb_df.iterrows():
         labor_name = str(row.get('Labor_Name', ''))
         
         if len(labor_name) < 4: continue
 
         # FUZZY MATCHING
+        # score_cutoff=88 keeps accuracy high
         match_name, score = process.extractOne(labor_name, public_names, score_cutoff=88)
         
         if match_name:
@@ -102,64 +104,48 @@ def match_tickers(nlrb_df, sec_df):
                 "Case_Type": row.get('Case_Type')
             })
             
-        if index % 10 == 0:
-            progress_bar.progress(min(index / total_rows, 1.0))
-            
-    progress_bar.empty()
-    
     if not matched_data:
-        return pd.DataFrame()
+        return pd.DataFrame(), "No public companies found in the latest batch."
         
-    return pd.DataFrame(matched_data)
+    return pd.DataFrame(matched_data), None
 
 # --- 3. MAIN APP EXECUTION ---
 
-# SIDEBAR: DATA UPLOAD
-st.sidebar.header("📁 Data Source")
-uploaded_file = st.sidebar.file_uploader("Drop 'Recent Filings.csv' here", type="csv")
+# Check if data exists
+if not os.path.exists(DATA_FILE):
+    st.warning(f"⚠️ Data file `{DATA_FILE}` not found.")
+    st.info("System is waiting for the Cron Job to generate the initial dataset.")
+    st.stop()
 
+# Load SEC Data
 df_sec = get_sec_tickers()
 
-if uploaded_file is not None:
-    st.sidebar.success("✅ Custom Data Loaded")
-    df_raw = pd.read_csv(uploaded_file)
-    # Filter for RC/RD/RM (Union Votes) immediately
-    if 'Case Number' in df_raw.columns:
-         df_raw = df_raw[df_raw['Case Number'].str.contains("-RC-|-RD-|-RM-", na=False)]
-    
-    # Run Matcher
-    if 'matched_df' not in st.session_state or st.sidebar.button("Re-run Matcher"):
-        st.session_state['matched_df'] = match_tickers(df_raw.head(200), df_sec)
-else:
-    st.sidebar.info("Using Demo Data (Upload CSV for real results)")
-    # For demo data, we simulate the matching result directly
-    demo_df = load_demo_data()
-    # Add dummy tickers for the demo
-    demo_df['Ticker'] = ['SBUX', 'SBUX', 'AMZN', 'WFC', 'AAPL']
-    demo_df['Public_Name'] = ['Starbucks Corp', 'Starbucks Corp', 'Amazon.com Inc', 'Wells Fargo & Co', 'Apple Inc.']
-    st.session_state['matched_df'] = demo_df
-
-df_final = st.session_state['matched_df']
+# Process Local CSV
+with st.spinner('Processing daily data feed...'):
+    df_final, error_msg = process_local_data(DATA_FILE, df_sec)
 
 if df_final.empty:
-    st.warning("No public companies matched in the uploaded file.")
+    st.warning(error_msg)
+    st.write("Raw File Preview:")
+    st.dataframe(pd.read_csv(DATA_FILE).head())
     st.stop()
 
 # --- 4. DASHBOARD UI ---
 
+# Sidebar Selector
 ticker_list = df_final['Ticker'].unique().tolist()
-selected_ticker = st.selectbox("Select Company to Analyze", ticker_list)
+selected_ticker = st.sidebar.selectbox("Select Company to Analyze", ticker_list)
 
 ticker_data = df_final[df_final['Ticker'] == selected_ticker]
 
-# METRICS
+# Metrics
 m1, m2, m3 = st.columns(3)
 m1.metric("Union Filings", len(ticker_data))
 m2.metric("States", ticker_data['State'].nunique())
 total_emp = pd.to_numeric(ticker_data['Employees'], errors='coerce').sum()
 m3.metric("Employees Affected", f"{int(total_emp)}")
 
-# TABS
+# Tabs
 tab1, tab2, tab3 = st.tabs(["🗺️ Heatmap", "📉 Stock Overlay", "📄 Raw Data"])
 
 with tab1:
@@ -174,18 +160,13 @@ with tab1:
         scope="usa",
         color_continuous_scale="Reds"
     )
-    
-    # UPGRADE: Make background transparent to match Dark Mode
+    # Dark Mode Fix
     fig_map.update_layout(
-        geo=dict(
-            bgcolor= 'rgba(0,0,0,0)', # Transparent land background
-            lakecolor='rgba(0,0,0,0)',
-        ),
-        paper_bgcolor='rgba(0,0,0,0)', # Transparent outer chart
-        plot_bgcolor='rgba(0,0,0,0)',  # Transparent inner chart
-        margin=dict(l=0, r=0, t=0, b=0) # Remove whitespace margins
+        geo=dict(bgcolor= 'rgba(0,0,0,0)', lakecolor='rgba(0,0,0,0)'),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=0, r=0, t=0, b=0)
     )
-    
     st.plotly_chart(fig_map, use_container_width=True)
 
 with tab2:
@@ -193,27 +174,24 @@ with tab2:
     if selected_ticker:
         end = datetime.now()
         start = end - timedelta(days=365)
-        
-        # Safe fetch
         try:
             stock_df = yf.download(selected_ticker, start=start, end=end, progress=False)
             stock_df = stock_df.reset_index()
             
             if not stock_df.empty:
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=stock_df['Date'], y=stock_df['Close'], name='Price', line=dict(color='blue')))
+                fig.add_trace(go.Scatter(x=stock_df['Date'], y=stock_df['Close'], name='Price', line=dict(color='#00CC96')))
                 
-                # Add Markers
+                # Markers
                 filing_dates = pd.to_datetime(ticker_data['Date']).dt.date.unique()
                 for f_date in filing_dates:
-                    # Find closest price
                     mask = stock_df['Date'].dt.date == f_date
                     if mask.any():
                         price = stock_df.loc[mask, 'Close'].values[0]
                         fig.add_trace(go.Scatter(
                             x=[f_date], y=[price],
                             mode='markers',
-                            marker=dict(color='red', size=12, symbol='star'),
+                            marker=dict(color='#EF553B', size=12, symbol='diamond'),
                             name='Filing', showlegend=False
                         ))
                 
@@ -226,4 +204,3 @@ with tab2:
 
 with tab3:
     st.dataframe(ticker_data)
-
