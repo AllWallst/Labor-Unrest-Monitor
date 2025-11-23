@@ -5,3 +5,4 @@ yfinance
 requests
 thefuzz
 python-Levenshtein
+lxml
